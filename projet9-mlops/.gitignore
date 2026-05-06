@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+projet9-env/
+
+# Scala / SBT
+target/
+.bsp/
+.metals/
+.idea/
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Data
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Docker
+.env
+
+# OS
+.DS_Store
+*.log
