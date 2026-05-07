@@ -2,10 +2,15 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Installer les dépendances système
+# Installer Java + dépendances système (requis par PySpark)
 RUN apt-get update && apt-get install -y \
     curl \
+    default-jdk \
     && rm -rf /var/lib/apt/lists/*
+
+# Définir JAVA_HOME
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # Copier et installer les dépendances Python
 COPY requirements.txt .

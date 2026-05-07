@@ -1,13 +1,18 @@
 import mlflow
 import mlflow.spark
 import os
-import pandas as pd
+import sys
+
+# Forcer JAVA_HOME avant d'importer PySpark
+os.environ["JAVA_HOME"] = "/usr/lib/jvm/default-java"
+os.environ["PATH"] = f"/usr/lib/jvm/default-java/bin:{os.environ.get('PATH', '')}"
+
+from pyspark.sql import SparkSession
 from typing import List, Dict, Any
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Mapping index -> nom de l'espèce
 SPECIES_MAP = {
     0: "setosa",
     1: "versicolor",
@@ -21,19 +26,36 @@ class MLflowService:
         self.model_stage   = os.getenv("MODEL_STAGE", "Production")
         self.model         = None
         self.model_version = None
+        self.spark         = None
 
         mlflow.set_tracking_uri(self.tracking_uri)
         logger.info(f"MLflow Tracking URI : {self.tracking_uri}")
 
+    def _get_spark(self):
+        """Créer ou récupérer la SparkSession"""
+        if self.spark is None:
+            logger.info(f"JAVA_HOME = {os.environ.get('JAVA_HOME')}")
+            self.spark = SparkSession.builder \
+                .appName("MLOps-API") \
+                .master("local[*]") \
+                .config("spark.driver.memory", "1g") \
+                .config("spark.ui.enabled", "false") \
+                .getOrCreate()
+            self.spark.sparkContext.setLogLevel("WARN")
+            logger.info("SparkSession créée avec succès")
+        return self.spark
+
     def load_model(self):
-        """Charger le modèle depuis le registre MLflow"""
+        """Charger le modèle Spark depuis le registre MLflow"""
         try:
+            logger.info("Initialisation de SparkSession...")
+            self._get_spark()
+
             model_uri = f"models:/{self.model_name}/{self.model_stage}"
             logger.info(f"Chargement du modèle : {model_uri}")
 
-            self.model = mlflow.pyfunc.load_model(model_uri)
+            self.model = mlflow.spark.load_model(model_uri)
 
-            # Récupérer la version du modèle
             client = mlflow.tracking.MlflowClient()
             versions = client.get_latest_versions(
                 self.model_name,
@@ -42,7 +64,7 @@ class MLflowService:
             if versions:
                 self.model_version = versions[0].version
 
-            logger.info(f"Modèle chargé - Version : {self.model_version}")
+            logger.info(f"Modèle Spark chargé - Version : {self.model_version}")
             return True
 
         except Exception as e:
@@ -54,9 +76,10 @@ class MLflowService:
         if self.model is None:
             raise RuntimeError("Modèle non chargé")
 
-        df = pd.DataFrame([features])
-        prediction = self.model.predict(df)
-        pred_index = int(prediction[0])
+        spark = self._get_spark()
+        df = spark.createDataFrame([features])
+        predictions = self.model.transform(df)
+        pred_index = int(predictions.select("prediction").first()[0])
 
         return {
             "prediction":    pred_index,
@@ -70,12 +93,14 @@ class MLflowService:
         if self.model is None:
             raise RuntimeError("Modèle non chargé")
 
-        df          = pd.DataFrame(instances)
-        predictions = self.model.predict(df)
+        spark = self._get_spark()
+        df = spark.createDataFrame(instances)
+        predictions = self.model.transform(df)
+        pred_rows = predictions.select("prediction").collect()
 
         results = []
-        for pred in predictions:
-            pred_index = int(pred)
+        for row in pred_rows:
+            pred_index = int(row[0])
             results.append({
                 "prediction":    pred_index,
                 "species":       SPECIES_MAP.get(pred_index, "unknown"),
@@ -84,5 +109,4 @@ class MLflowService:
             })
         return results
 
-# Instance globale
 mlflow_service = MLflowService()
