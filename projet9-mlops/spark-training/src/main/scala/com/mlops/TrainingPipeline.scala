@@ -1,117 +1,152 @@
 package com.mlops
 
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.ml.classification.RandomForestClassifier
-import org.apache.spark.ml.Pipeline
-import org.mlflow.api.proto.Service.RunStatus
+import org.apache.spark.ml.classification.{
+  LogisticRegression,
+  RandomForestClassifier,
+  GBTClassifier
+}
 import org.mlflow.tracking.MlflowClient
-import org.mlflow.spark.SparkModelFlavor
+import org.mlflow.api.proto.Service.RunStatus
 import org.slf4j.LoggerFactory
 
 object TrainingPipeline {
 
   private val logger = LoggerFactory.getLogger(getClass)
 
+  // ── Configuration ──────────────────────────────────────────────────────────
+  val MLFLOW_URI  = sys.env.getOrElse("MLFLOW_TRACKING_URI",    "http://localhost:5000")
+  val S3_ENDPOINT = sys.env.getOrElse("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
+  val ACCESS_KEY  = sys.env.getOrElse("AWS_ACCESS_KEY_ID",      "minioadmin")
+  val SECRET_KEY  = sys.env.getOrElse("AWS_SECRET_ACCESS_KEY",  "minioadmin123")
+  val DATA_PATH   = sys.env.getOrElse("DATA_PATH",
+    "../data/raw/diabetes.csv")
+  val EXP_NAME    = "diabetes_classification_scala"
+
   def main(args: Array[String]): Unit = {
 
-    val mlflowTrackingUri = sys.env.getOrElse("MLFLOW_TRACKING_URI", "http://localhost:5000")
-    val dataPath          = sys.env.getOrElse("DATA_PATH", "/opt/data/raw/iris.csv")
-    val experimentName    = "iris-classification"
+    // ── Session Spark ────────────────────────────────────────────────────────
+    println("\n🔥 Initialisation de la session Spark...")
+    logger.info("Démarrage de la session Spark...")
 
     val spark = SparkSession.builder()
-      .appName("MLOps Training Pipeline")
-      .master(sys.env.getOrElse("SPARK_MASTER", "local[*]"))
-      .config("spark.sql.shuffle.partitions", "4")
+      .appName("DiabetesPrediction-Scala")
+      .master("local[*]")
+      .config("spark.sql.shuffle.partitions",          "4")
+      .config("spark.driver.memory",                   "2g")
+      .config("spark.hadoop.fs.s3a.endpoint",          S3_ENDPOINT)
+      .config("spark.hadoop.fs.s3a.access.key",        ACCESS_KEY)
+      .config("spark.hadoop.fs.s3a.secret.key",        SECRET_KEY)
+      .config("spark.hadoop.fs.s3a.path.style.access", "true")
       .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")
-    logger.info("SparkSession démarrée")
+    println(s"   ✅ Spark version : ${spark.version}")
+    println(s"   ✅ Master        : ${spark.sparkContext.master}")
+    logger.info(s"Spark démarré — version ${spark.version}")
 
-    val mlflowClient = new MlflowClient(mlflowTrackingUri)
+    // ── Chargement et prétraitement ──────────────────────────────────────────
+    val rawDf              = DataPreprocessor.loadData(spark, DATA_PATH)
+    val (_, transformedDf) = DataPreprocessor.buildPreprocessingPipeline(rawDf)
+    val (trainDf, testDf)  = DataPreprocessor.splitData(transformedDf)
 
-    val experimentOptional = mlflowClient.getExperimentByName(experimentName)
-    val experimentId: String = if (experimentOptional.isPresent) {
-      experimentOptional.get().getExperimentId
-    } else {
-      mlflowClient.createExperiment(experimentName)
+    // ── Modèles Spark MLlib ──────────────────────────────────────────────────
+    val models = Seq(
+
+      ("LogisticRegression", new LogisticRegression()
+        .setLabelCol("Outcome")
+        .setFeaturesCol("features")
+        .setMaxIter(100)
+        .setRegParam(0.01)),
+
+      ("RandomForest", new RandomForestClassifier()
+        .setLabelCol("Outcome")
+        .setFeaturesCol("features")
+        .setNumTrees(100)
+        .setSeed(42L)),
+
+      ("GradientBoosting", new GBTClassifier()
+        .setLabelCol("Outcome")
+        .setFeaturesCol("features")
+        .setMaxIter(100)
+        .setMaxDepth(3)
+        .setStepSize(0.1)
+        .setSeed(42L))
+    )
+
+    // ── MLflow Client ────────────────────────────────────────────────────────
+    val client = new MlflowClient(MLFLOW_URI)
+
+    val experimentId = {
+      val expOpt = client.getExperimentByName(EXP_NAME)
+      if (expOpt.isPresent) expOpt.get().getExperimentId
+      else client.createExperiment(EXP_NAME)
     }
 
-    logger.info(s"Expérience MLflow : $experimentName (ID: $experimentId)")
+    logger.info(s"Expérience MLflow : $EXP_NAME (ID: $experimentId)")
+    println(s"\n🚀 Lancement des expériences MLflow...")
+    println("-" * 65)
 
-    val activeRun = mlflowClient.createRun(experimentId)
-    val runId     = activeRun.getRunId
+    // ── Entraînement de chaque modèle ────────────────────────────────────────
+    models.foreach { case (modelName, model) =>
 
-    logger.info(s"Run MLflow démarré : $runId")
+      val runId = client.createRun(experimentId).getRunId
+      logger.info(s"Run démarré pour $modelName : $runId")
 
-    try {
-      val numTrees   = 100
-      val maxDepth   = 5
-      val trainRatio = 0.8
+      try {
+        // Tags
+        client.setTag(runId, "model_name",    modelName)
+        client.setTag(runId, "framework",     "Spark MLlib Scala")
+        client.setTag(runId, "spark_version", spark.version)
+        client.setTag(runId, "language",      "Scala 2.12")
+        client.setTag(runId, "dataset",       "Pima Indians Diabetes")
 
-      mlflowClient.logParam(runId, "num_trees",   numTrees.toString)
-      mlflowClient.logParam(runId, "max_depth",   maxDepth.toString)
-      mlflowClient.logParam(runId, "train_ratio", trainRatio.toString)
-      mlflowClient.logParam(runId, "model_type",  "RandomForestClassifier")
-      mlflowClient.logParam(runId, "dataset",     "iris")
+        // Paramètres
+        client.logParam(runId, "model_type",  modelName)
+        client.logParam(runId, "train_size",  trainDf.count().toString)
+        client.logParam(runId, "test_size",   testDf.count().toString)
+        client.logParam(runId, "spark_master", spark.sparkContext.master)
 
-      val rawData   = DataPreprocessor.loadData(spark, dataPath)
-      val cleanData = DataPreprocessor.cleanData(rawData)
-      val (trainData, testData) = DataPreprocessor.splitData(cleanData, trainRatio)
+        // Entraînement
+        val startTime   = System.currentTimeMillis()
+        val fittedModel = model.fit(trainDf)
+        val trainTime   = (System.currentTimeMillis() - startTime) / 1000.0
 
-      mlflowClient.logMetric(runId, "train_size", trainData.count().toDouble)
-      mlflowClient.logMetric(runId, "test_size",  testData.count().toDouble)
+        client.logParam(runId, "training_time_seconds", f"$trainTime%.2f")
 
-      val preprocessingPipeline = DataPreprocessor.buildPreprocessingPipeline()
+        // Prédictions et métriques
+        val predictions = fittedModel.transform(testDf)
+        val metrics     = ModelEvaluator.evaluate(predictions)
 
-      val classifier = new RandomForestClassifier()
-        .setLabelCol("label")
-        .setFeaturesCol("scaled_features")
-        .setNumTrees(numTrees)
-        .setMaxDepth(maxDepth)
-        .setSeed(42)
+        // Log métriques dans MLflow
+        metrics.foreach { case (name, value) =>
+          client.logMetric(runId, name, value)
+        }
 
-      val fullPipeline = new Pipeline()
-        .setStages(preprocessingPipeline.getStages :+ classifier)
+        // Affichage matrice de confusion
+        ModelEvaluator.printConfusionMatrix(predictions)
 
-      logger.info("Entraînement du modèle...")
-      val startTime = System.currentTimeMillis()
-      val model     = fullPipeline.fit(trainData)
-      val trainTime = (System.currentTimeMillis() - startTime) / 1000.0
+        // Affichage résumé
+        ModelEvaluator.printMetrics(modelName, metrics)
 
-      logger.info(f"Entraînement terminé en $trainTime%.2f secondes")
-      mlflowClient.logMetric(runId, "training_time_seconds", trainTime)
+        client.setTerminated(runId, RunStatus.FINISHED)
+        logger.info(s"✅ $modelName terminé — ROC AUC: ${metrics("roc_auc")}")
 
-      val predictions = model.transform(testData)
-      val metrics     = ModelEvaluator.evaluate(predictions)
-      ModelEvaluator.printConfusionMatrix(predictions)
-
-      metrics.foreach { case (name, value) =>
-        mlflowClient.logMetric(runId, name, value)
+      } catch {
+        case e: Exception =>
+          println(s"❌ Erreur $modelName : ${e.getMessage}")
+          logger.error(s"Erreur pour $modelName : ${e.getMessage}", e)
+          client.setTerminated(runId, RunStatus.FAILED)
       }
-
-      // ✅ Logger le modèle dans MLflow avec Spark 3.5.1
-      logger.info("Logging du modèle dans MLflow...")
-      SparkModelFlavor.logModel(
-        model,
-        "spark-model",
-        runId,
-        mlflowClient
-      )
-      logger.info("✅ Modèle loggé dans MLflow")
-
-      mlflowClient.setTag(runId, "model_type", "spark-pipeline")
-
-      mlflowClient.setTerminated(runId, RunStatus.FINISHED)
-      logger.info(s"✅ Run MLflow terminé avec succès : $runId")
-      logger.info(s"✅ Accuracy : ${metrics("accuracy")}")
-
-    } catch {
-      case e: Exception =>
-        logger.error(s"Erreur durant l'entraînement : ${e.getMessage}", e)
-        mlflowClient.setTerminated(runId, RunStatus.FAILED)
-        throw e
-    } finally {
-      spark.stop()
     }
+
+    println("-" * 65)
+
+    // ── Arrêt Spark ──────────────────────────────────────────────────────────
+    spark.stop()
+    println("\n🔥 Session Spark arrêtée proprement")
+    println(s"✅ Terminé ! Voir les résultats sur : $MLFLOW_URI")
+    println(s"   Expérience : $EXP_NAME")
+    logger.info("Pipeline terminé avec succès")
   }
 }
