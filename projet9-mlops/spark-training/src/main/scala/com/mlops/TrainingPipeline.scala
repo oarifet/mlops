@@ -5,6 +5,7 @@ import org.apache.spark.ml.classification.RandomForestClassifier
 import org.apache.spark.ml.Pipeline
 import org.mlflow.api.proto.Service.RunStatus
 import org.mlflow.tracking.MlflowClient
+import org.mlflow.spark.SparkModelFlavor
 import org.slf4j.LoggerFactory
 
 object TrainingPipeline {
@@ -88,16 +89,18 @@ object TrainingPipeline {
         mlflowClient.logMetric(runId, name, value)
       }
 
-      // ─── Sauvegarde modèle en local /tmp ─────────────────
-      val modelPath = s"/tmp/mlops-model-$runId"
-      model.write.overwrite().save(modelPath)
-      logger.info(s"Modèle sauvegardé : $modelPath")
+      // ✅ Logger le modèle dans MLflow avec Spark 3.5.1
+      logger.info("Logging du modèle dans MLflow...")
+      SparkModelFlavor.logModel(
+        model,
+        "spark-model",
+        runId,
+        mlflowClient
+      )
+      logger.info("✅ Modèle loggé dans MLflow")
 
-      // Logger le chemin comme tag MLflow
-      mlflowClient.setTag(runId, "model_path", modelPath)
       mlflowClient.setTag(runId, "model_type", "spark-pipeline")
 
-      // ─── Terminer le Run ──────────────────────────────────
       mlflowClient.setTerminated(runId, RunStatus.FINISHED)
       logger.info(s"✅ Run MLflow terminé avec succès : $runId")
       logger.info(s"✅ Accuracy : ${metrics("accuracy")}")

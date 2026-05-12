@@ -1,25 +1,27 @@
+# api-serving/app/routes/health.py
+
 from fastapi import APIRouter
 from datetime import datetime
+from app.services.mlflow_service import mlflow_service
 
 router = APIRouter()
 
-@router.get("/health", tags=["Monitoring"])
-def health_check():
-    """Vérifier l'état de l'API"""
+
+@router.get("/health", tags=["Health"])
+def health():
     return {
-        "status":    "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
-        "service":   "MLOps Prediction API"
+        "status"    : "healthy",
+        "timestamp" : datetime.utcnow().isoformat(),
+        "service"   : "MLOps Diabetes Prediction API"
     }
 
-@router.get("/ready", tags=["Monitoring"])
-def readiness_check():
-    """Vérifier si le modèle est chargé et prêt"""
-    from app.services.mlflow_service import mlflow_service
-    model_loaded = mlflow_service.model is not None
+
+@router.get("/ready", tags=["Health"])
+def ready():
+    loaded = mlflow_service.is_loaded()
     return {
-        "status":        "ready" if model_loaded else "not_ready",
-        "model_loaded":  model_loaded,
-        "model_version": mlflow_service.model_version,
-        "timestamp":     datetime.utcnow().isoformat()
+        "status"        : "ready" if loaded else "not ready",
+        "model_loaded"  : loaded,
+        "model_name"    : mlflow_service.model_name,
+        "model_version" : mlflow_service.get_model_version()
     }
